@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simple Voice Chatbot</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 760px;
+      margin: 40px auto;
+      padding: 0 16px;
+      background: #111;
+      color: #f5f5f5;
+    }
+
+    h1 {
+      margin-bottom: 8px;
+    }
+
+    .sub {
+      color: #bbb;
+      margin-bottom: 24px;
+    }
+
+    .chat {
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 16px;
+      min-height: 320px;
+      background: #181818;
+      overflow-y: auto;
+      margin-bottom: 16px;
+    }
+
+    .msg {
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      max-width: 85%;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+
+    .user {
+      background: #2a2a2a;
+      margin-left: auto;
+    }
+
+    .bot {
+      background: #202a3a;
+      margin-right: auto;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 14px;
+      border-radius: 10px;
+      border: 1px solid #333;
+      background: #1a1a1a;
+      color: white;
+      font-size: 16px;
+    }
+
+    button {
+      padding: 12px 16px;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 15px;
+      background: #2f6fed;
+      color: white;
+    }
+
+    button.secondary {
+      background: #444;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .status {
+      margin-top: 10px;
+      color: #aaa;
+      font-size: 14px;
+      min-height: 18px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Voice Chatbot</h1>
+  <div class="sub">Type or use the mic. The message goes to n8n, which returns text + Polly audio.</div>
+
+  <div id="chat" class="chat"></div>
+
+  <div class="controls">
+    <input id="messageInput" type="text" placeholder="Type a message..." />
+    <button id="sendBtn">Send</button>
+    <button id="micBtn" class="secondary">🎙 Talk</button>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <script>
+    // Replace with your production n8n webhook URL
+    const N8N_WEBHOOK_URL = "https://YOUR-N8N-DOMAIN/webhook/chatbot-voice";
+
+    const chatEl = document.getElementById("chat");
+    const inputEl = document.getElementById("messageInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const micBtn = document.getElementById("micBtn");
+    const statusEl = document.getElementById("status");
+
+    let isBusy = false;
+    let currentAudio = null;
+
+    const sessionId = localStorage.getItem("chatbotSessionId") || crypto.randomUUID();
+    localStorage.setItem("chatbotSessionId", sessionId);
+
+    function addMessage(text, role) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.textContent = text;
+      chatEl.appendChild(div);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text || "";
+    }
+
+    function setBusy(busy) {
+      isBusy = busy;
+      sendBtn.disabled = busy;
+      micBtn.disabled = busy;
+    }
+
+    async function sendMessage(message) {
+      const trimmed = message.trim();
+      if (!trimmed || isBusy) return;
+
+      addMessage(trimmed, "user");
+      inputEl.value = "";
+      setBusy(true);
+      setStatus("Sending to n8n...");
+
+      try {
+        const response = await fetch(N8N_WEBHOOK_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            message: trimmed,
+            sessionId: sessionId,
+            source: "github-pages-chatbot"
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        const replyText = data.replyText || "No reply text returned.";
+        const audioBase64 = data.audioBase64 || null;
+        const audioMimeType = data.audioMimeType || "audio/mpeg";
+
+        addMessage(replyText, "bot");
+
+        if (audioBase64) {
+          setStatus("Playing audio...");
+          if (currentAudio) {
+            currentAudio.pause();
+            currentAudio = null;
+          }
+
+          const audioUrl = `data:${audioMimeType};base64,${audioBase64}`;
+          currentAudio = new Audio(audioUrl);
+          currentAudio.play().catch(err => {
+            console.error("Audio playback failed:", err);
+            setStatus("Reply received, but audio playback was blocked.");
+          });
+        } else {
+          setStatus("Reply received, but no audio was returned.");
+        }
+      } catch (err) {
+        console.error(err);
+        addMessage("Something went wrong while contacting the workflow.", "bot");
+        setStatus("Request failed.");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    sendBtn.addEventListener("click", () => {
+      sendMessage(inputEl.value);
+    });
+
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        sendMessage(inputEl.value);
+      }
+    });
+
+    // Browser speech-to-text using Web Speech API
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+    let listening = false;
+
+    if (SpeechRecognition) {
+      recognition = new SpeechRecognition();
+      recognition.lang = "en-US";
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        listening = true;
+        micBtn.textContent = "⏹ Stop";
+        setStatus("Listening...");
+      };
+
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        inputEl.value = transcript;
+        setStatus("Speech captured.");
+        sendMessage(transcript);
+      };
+
+      recognition.onerror = (event) => {
+        console.error("Speech recognition error:", event.error);
+        setStatus(`Mic error: ${event.error}`);
+      };
+
+      recognition.onend = () => {
+        listening = false;
+        micBtn.textContent = "🎙 Talk";
+      };
+
+      micBtn.addEventListener("click", () => {
+        if (isBusy) return;
+
+        if (!listening) {
+          recognition.start();
+        } else {
+          recognition.stop();
+        }
+      });
+    } else {
+      micBtn.disabled = true;
+      setStatus("Speech recognition is not supported in this browser.");
+    }
+
+    addMessage("Hi. Ask me something.", "bot");
+  </script>
+</body>
+</html>
